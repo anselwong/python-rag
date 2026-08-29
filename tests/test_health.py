@@ -9,7 +9,7 @@ from app.services import knowledge
 
 
 def make_client(tmp_path: Path) -> TestClient:
-    database.DATABASE_PATH = tmp_path / "test.sqlite3"
+    database.configure_database(f"sqlite:///{tmp_path / 'test.sqlite3'}")
     knowledge.UPLOAD_DIR = tmp_path / "uploads"
     knowledge.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     database.initialize_database()

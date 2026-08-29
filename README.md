@@ -1,10 +1,28 @@
 # python-rag
 
-RAG knowledge base backend, built with FastAPI.
+RAG knowledge base backend, built with FastAPI and PostgreSQL + pgvector.
 
 ## Local development
 
-Python 3.11 is recommended. Python 3.9 or later is supported for Day 1.
+Python 3.11 is recommended. Python 3.9 or later is supported.
+
+## PostgreSQL
+
+Production persistence uses PostgreSQL. The `chunks.embedding` column is a
+pgvector column reserved for Day 6 Embedding and similarity search. Start the
+local database with Docker:
+
+```bash
+docker compose up -d postgres
+```
+
+The default connection is `postgresql+psycopg://rag:rag@localhost:5432/rag`.
+Override it with `DATABASE_URL` when using another PostgreSQL instance. The
+`vector` extension is enabled automatically on application startup.
+
+The tests use a temporary SQLite database only to avoid requiring a running
+PostgreSQL server; application code and production configuration target
+PostgreSQL.
 
 Day 4 adds document upload and parsing dependencies: `python-multipart` handles
 `multipart/form-data`, PyMuPDF extracts PDF pages, and `python-docx` extracts DOCX
