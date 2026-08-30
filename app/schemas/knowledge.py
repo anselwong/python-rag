@@ -36,6 +36,16 @@ class DocumentPageResponse(BaseModel):
     text: str
 
 
+class DocumentChunkResponse(BaseModel):
+    """切片预览所需的最小字段；embedding 不通过接口返回，避免泄露大数组。"""
+
+    id: str
+    document_id: str
+    page: int
+    content: str
+    token_count: int
+
+
 class DocumentDetailResponse(DocumentResponse):
     pages: List[DocumentPageResponse]
-
+    chunks: List[DocumentChunkResponse]

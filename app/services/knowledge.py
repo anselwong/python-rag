@@ -1,7 +1,7 @@
-"""知识库、文件和文档解析业务服务。
+"""知识库、文件、文档解析与切片业务服务。
 
-本模块只处理元数据和原文解析，不在 Day 4 提前调用 Embedding。
-Day 6 会复用 Document/Chunk ORM 模型把切片向量写入 pgvector。
+本模块处理元数据、原文解析和切片落库，不在 Day 5 提前调用 Embedding。
+Day 6 会复用 Chunk ORM 模型把切片向量写入 pgvector 的 embedding 列。
 """
 
 import json
@@ -13,7 +13,8 @@ from typing import Dict, List
 from fastapi import UploadFile
 
 from app.core.config import settings
-from app.core.database import Document, KnowledgeBase, get_session
+from app.core.database import Chunk, Document, KnowledgeBase, get_session
+from app.services.chunker import split_pages_into_chunks
 from app.services.parser import parse_document
 
 UPLOAD_DIR = settings.data_dir / "uploads"
@@ -54,6 +55,14 @@ def get_document(document_id: str) -> Dict:
             raise KeyError("文档不存在")
         result = _document_row(item)
         result["pages"] = [{"document_id": document_id, "page": page["page"], "text": page["text"]} for page in json.loads(item.pages_json)]
+        # 详情接口同时返回切片，方便前端验证“解析文本 -> 切片”的中间产物。
+        # embedding 属于内部向量数据，不能为了预览把它序列化到 HTTP 响应。
+        # ID 后缀是数字序号，必须按整数排序；字符串排序会把 10 排在 2 前面。
+        ordered_chunks = sorted(item.chunks, key=lambda value: int(value.id.rsplit("-", 1)[-1]))
+        result["chunks"] = [
+            {"id": chunk.id, "document_id": document_id, "page": chunk.page, "content": chunk.content, "token_count": chunk.token_count}
+            for chunk in ordered_chunks
+        ]
         return result
 
 
@@ -75,12 +84,19 @@ async def ingest_document(knowledge_base_id: str, upload: UploadFile) -> Dict:
                     raise ValueError("文件大小不能超过 20 MB")
                 target.write(chunk)
         pages = [{"page": page, "text": text} for page, text in parse_document(destination, extension)]
+        # Day 5：解析完成后立即切片。切片与文档元数据在同一个事务里写入，
+        # 保证"文档存在则切片必完整"，不会出现有文档无切片的半写入状态。
+        chunks = split_pages_into_chunks([(page["page"], page["text"]) for page in pages])
         timestamp = now_utc()
         with get_session() as session:
             knowledge_base = session.get(KnowledgeBase, knowledge_base_id)
             if knowledge_base is None:
                 raise KeyError("知识库不存在")
-            session.add(Document(id=document_id, knowledge_base_id=knowledge_base_id, name=original_name, stored_name=destination.name, file_type=extension[1:].upper(), size_bytes=size, chunk_count=0, status="ready", pages_json=json.dumps(pages, ensure_ascii=False), created_at=timestamp))
+            session.add(Document(id=document_id, knowledge_base_id=knowledge_base_id, name=original_name, stored_name=destination.name, file_type=extension[1:].upper(), size_bytes=size, chunk_count=len(chunks), status="ready", pages_json=json.dumps(pages, ensure_ascii=False), created_at=timestamp))
+            # chunk id 用 document_id-序号 而非随机 uuid：可读、可追溯到文档，
+            # 且同一文档将来重新切片时天然幂等（同 id 覆盖旧记录）。
+            for index, chunk in enumerate(chunks):
+                session.add(Chunk(id=f"{document_id}-{index}", document_id=document_id, page=chunk["page"], content=chunk["content"], token_count=chunk["token_count"]))
             knowledge_base.updated_at = timestamp
     except Exception:
         destination.unlink(missing_ok=True)

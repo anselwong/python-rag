@@ -5,11 +5,13 @@
 """
 
 import os
+import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterator
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, create_engine, text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, create_engine, event, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 try:
@@ -20,6 +22,19 @@ except ImportError:  # 仅允许无 pgvector 的测试环境导入
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://rag:rag@localhost:5432/rag")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+
+@event.listens_for(Engine, "connect")
+def _enable_sqlite_foreign_keys(dbapi_connection, connection_record):
+    """SQLite 默认关闭外键约束，必须逐连接执行 PRAGMA 才能让 ON DELETE CASCADE 生效。
+
+    PostgreSQL 默认启用外键，无需处理。这个 listener 让 SQLite 测试环境与
+    生产行为一致——否则删除文档会留下孤儿 chunk（集成测试已抓到该问题）。
+    """
+    if isinstance(dbapi_connection, sqlite3.Connection):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 def configure_database(url: str) -> None:
@@ -58,17 +73,25 @@ class Document(Base):
     pages_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     knowledge_base: Mapped[KnowledgeBase] = relationship(back_populates="documents")
+    # relationship 让 SQLAlchemy 的 flush 按依赖排序（先 documents 后 chunks）。
+    # 仅靠表级 ForeignKey 不参与 mapper 间排序，外键开启后会插入乱序报错；
+    # cascade 同时提供 ORM 级联删除，数据库外键作为最后兜底。
+    chunks: Mapped[list["Chunk"]] = relationship(back_populates="document", cascade="all, delete-orphan")
 
 
 class Chunk(Base):
     """切片表预留 pgvector 向量列，Day 6 只需填充 embedding 即可检索。"""
     __tablename__ = "chunks"
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    # id 格式为 "{document_id}-{序号}"（36+1+N 字符），比纯 UUID 更可读、可追溯，
+    # 同一文档重新切片时天然幂等。列宽取 64 以容纳后缀序号——
+    # SQLite 不校验 VARCHAR 长度，PostgreSQL 会严格拒绝超长值，测试替身抓不到这类问题。
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
     page: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     embedding = mapped_column(Vector(1536) if Vector else Text, nullable=True)
+    document: Mapped["Document"] = relationship(back_populates="chunks")
 
 
 Index("idx_documents_kb", Document.knowledge_base_id)

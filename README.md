@@ -28,6 +28,12 @@ Day 4 adds document upload and parsing dependencies: `python-multipart` handles
 `multipart/form-data`, PyMuPDF extracts PDF pages, and `python-docx` extracts DOCX
 paragraphs. Parsed page text is saved as metadata for the later citation pipeline.
 
+Day 5 adds chunking: parsed pages are split into `chunks` rows at ingest time
+(paragraph aggregation with a token budget, hard split for oversized units, and
+tail overlap between consecutive chunks). Chunking and document metadata are
+written in the same transaction, so a document always has a complete set of
+chunks. `Document.chunk_count` and the knowledge base aggregate stay in sync.
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
