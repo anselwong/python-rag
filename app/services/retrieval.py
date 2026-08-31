@@ -40,7 +40,9 @@ def search(knowledge_base_id: str, query: str, top_k: int, score_threshold: floa
                 "document_name": document.name,
                 "page": chunk.page,
                 "content": chunk.content,
-                "score": round(score, 6),
+                # pgvector/NumPy 可能返回 numpy.float32；它能参与比较，却不能被
+                # json.dumps 序列化。API 与聊天记录边界统一转换为 Python float。
+                "score": float(round(float(score), 6)),
                 "rank": index,
                 "keywords": _keywords(chunk.content, query),
             }

@@ -94,8 +94,33 @@ class Chunk(Base):
     document: Mapped["Document"] = relationship(back_populates="chunks")
 
 
+class ChatSession(Base):
+    """一条可持续的对话线程，归属于知识库。"""
+    __tablename__ = "chat_sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    knowledge_base_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    messages: Mapped[list["ChatMessage"]] = relationship(back_populates="session", cascade="all, delete-orphan")
+
+
+class ChatMessage(Base):
+    """聊天消息；引用以 JSON 保存 ID、页码和分数，避免重复存储正文。"""
+    __tablename__ = "chat_messages"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    citations_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    session: Mapped[ChatSession] = relationship(back_populates="messages")
+
+
 Index("idx_documents_kb", Document.knowledge_base_id)
 Index("idx_chunks_document", Chunk.document_id)
+Index("idx_chat_sessions_kb", ChatSession.knowledge_base_id)
+Index("idx_chat_messages_session", ChatMessage.session_id)
 
 
 def initialize_database() -> None:

@@ -1,16 +1,28 @@
 """知识库问答接口：先检索，再把证据交给大模型。"""
 
+import json
 import uuid
+from datetime import datetime, timezone
 from typing import Dict
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
 from app.schemas.chat import ChatRequest, ChatResponse
+from app.schemas.chat_stream import ChatStreamRequest
 from app.schemas.retrieval import RetrievalRequest
-from app.services.llm import LLMError, generate_answer
+from app.services.llm import LLMError, generate_answer, stream_answer
 from app.services.retrieval import search
+from app.core.database import ChatMessage, ChatSession, KnowledgeBase, get_session
 
 router = APIRouter(prefix="/knowledge-bases/{knowledge_base_id}")
+
+
+@router.get("/chat-sessions", summary="List persisted chat sessions")
+def get_chat_sessions(knowledge_base_id: str) -> list[dict]:
+    with get_session() as session:
+        rows = session.query(ChatSession).filter(ChatSession.knowledge_base_id == knowledge_base_id).order_by(ChatSession.updated_at.desc()).all()
+        return [{"id": row.id, "title": row.title, "updated_at": row.updated_at.isoformat(), "messages": [{"id": message.id, "role": message.role, "content": message.content, "created_at": message.created_at.isoformat(), "citations": json.loads(message.citations_json)} for message in sorted(row.messages, key=lambda value: value.created_at)]} for row in rows]
 
 
 @router.post("/chat", response_model=ChatResponse, summary="Answer with retrieved context")
@@ -20,4 +32,28 @@ def post_chat(knowledge_base_id: str, payload: ChatRequest) -> Dict:
         answer = generate_answer(payload.message.strip(), contexts)
     except LLMError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
-    return {"id": str(uuid.uuid4()), "role": "assistant", "content": answer, "citations": contexts}
+    timestamp = datetime.now(timezone.utc)
+    with get_session() as session:
+        if payload.session_id:
+            chat_session = session.query(ChatSession).filter(ChatSession.id == payload.session_id, ChatSession.knowledge_base_id == knowledge_base_id).one_or_none()
+            if chat_session is None:
+                raise HTTPException(status_code=404, detail="会话不存在")
+        else:
+            chat_session = ChatSession(id=str(uuid.uuid4()), knowledge_base_id=knowledge_base_id, title=payload.message.strip()[:40], created_at=timestamp, updated_at=timestamp)
+            session.add(chat_session)
+            session.flush()
+        session.add(ChatMessage(id=str(uuid.uuid4()), session_id=chat_session.id, role="user", content=payload.message.strip(), created_at=timestamp))
+        message_id = str(uuid.uuid4())
+        session.add(ChatMessage(id=message_id, session_id=chat_session.id, role="assistant", content=answer, citations_json=json.dumps(contexts, ensure_ascii=False), created_at=timestamp))
+        chat_session.updated_at = timestamp
+        return {"id": message_id, "session_id": chat_session.id, "role": "assistant", "content": answer, "citations": contexts}
+
+
+@router.post("/chat/stream", summary="Stream answer with Server-Sent Events")
+def post_chat_stream(knowledge_base_id: str, payload: ChatStreamRequest) -> StreamingResponse:
+    contexts = search(knowledge_base_id, payload.message.strip(), top_k=5, score_threshold=0.35)
+    try:
+        chunks = stream_answer(payload.message.strip(), contexts)
+        return StreamingResponse((f"data: {chunk}\n\n" for chunk in chunks), media_type="text/event-stream")
+    except LLMError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error

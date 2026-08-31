@@ -1,6 +1,7 @@
 """Day 6 检索接口测试：使用 SQLite 验证与 pgvector 等价的排序逻辑。"""
 
 from pathlib import Path
+import json
 
 from app.core import database
 from app.core.database import Chunk
@@ -21,6 +22,8 @@ def test_vector_search_returns_ranked_chunks(tmp_path: Path) -> None:
     assert results[0]["rank"] == 1
     assert results[0]["document_name"] == "guide.txt"
     assert all(results[index]["score"] >= results[index + 1]["score"] for index in range(len(results) - 1))
+    # 引用结果会写入聊天记录 JSON，分数必须是标准库可序列化的原生 float。
+    json.dumps(results)
 
 
 def test_search_validates_empty_query(tmp_path: Path) -> None:
