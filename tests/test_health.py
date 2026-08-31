@@ -1,3 +1,5 @@
+import os
+
 from fastapi.testclient import TestClient
 from pathlib import Path
 import tempfile
@@ -9,6 +11,8 @@ from app.services import knowledge
 
 
 def make_client(tmp_path: Path) -> TestClient:
+    # 测试不能依赖真实 API Key 或网络；hash 提供商只验证向量化数据流和检索排序。
+    os.environ["EMBEDDING_PROVIDER"] = "hash"
     database.configure_database(f"sqlite:///{tmp_path / 'test.sqlite3'}")
     knowledge.UPLOAD_DIR = tmp_path / "uploads"
     knowledge.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)

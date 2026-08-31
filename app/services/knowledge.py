@@ -15,6 +15,7 @@ from fastapi import UploadFile
 from app.core.config import settings
 from app.core.database import Chunk, Document, KnowledgeBase, get_session
 from app.services.chunker import split_pages_into_chunks
+from app.services.embedding import embed_texts
 from app.services.parser import parse_document
 
 UPLOAD_DIR = settings.data_dir / "uploads"
@@ -95,8 +96,10 @@ async def ingest_document(knowledge_base_id: str, upload: UploadFile) -> Dict:
             session.add(Document(id=document_id, knowledge_base_id=knowledge_base_id, name=original_name, stored_name=destination.name, file_type=extension[1:].upper(), size_bytes=size, chunk_count=len(chunks), status="ready", pages_json=json.dumps(pages, ensure_ascii=False), created_at=timestamp))
             # chunk id 用 document_id-序号 而非随机 uuid：可读、可追溯到文档，
             # 且同一文档将来重新切片时天然幂等（同 id 覆盖旧记录）。
-            for index, chunk in enumerate(chunks):
-                session.add(Chunk(id=f"{document_id}-{index}", document_id=document_id, page=chunk["page"], content=chunk["content"], token_count=chunk["token_count"]))
+            # 同一批切片一次性向量化，避免 N 个切片触发 N 次远程 API 调用。
+            vectors = embed_texts([chunk["content"] for chunk in chunks])
+            for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
+                session.add(Chunk(id=f"{document_id}-{index}", document_id=document_id, page=chunk["page"], content=chunk["content"], token_count=chunk["token_count"], embedding=vector))
             knowledge_base.updated_at = timestamp
     except Exception:
         destination.unlink(missing_ok=True)
@@ -113,6 +116,27 @@ def delete_document(knowledge_base_id: str, document_id: str) -> None:
         stored_path = UPLOAD_DIR / item.stored_name
         session.delete(item)
     stored_path.unlink(missing_ok=True)
+
+
+def reindex_embeddings(knowledge_base_id: str) -> int:
+    """用当前模型覆盖知识库全部切片向量，返回重建数量。
+
+    更换模型、版本或维度后，旧向量处于不同语义空间，不能与新查询向量混检；
+    因此必须对所有切片重建。先在事务外调用远程模型，避免网络等待长期占用数据库事务。
+    """
+    with get_session() as session:
+        knowledge_base = session.get(KnowledgeBase, knowledge_base_id)
+        if knowledge_base is None:
+            raise KeyError("知识库不存在")
+        chunks = session.query(Chunk).join(Document).filter(Document.knowledge_base_id == knowledge_base_id).order_by(Chunk.id).all()
+        payload = [(chunk.id, chunk.content) for chunk in chunks]
+    vectors = embed_texts([content for _, content in payload])
+    with get_session() as session:
+        for (chunk_id, _), vector in zip(payload, vectors):
+            chunk = session.get(Chunk, chunk_id)
+            if chunk is not None:
+                chunk.embedding = vector
+    return len(payload)
 
 
 def _knowledge_row(item: KnowledgeBase) -> Dict:

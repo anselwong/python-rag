@@ -31,7 +31,8 @@ def test_upload_creates_chunks_with_metadata(tmp_path: Path) -> None:
     assert len(rows) == document["chunk_count"]
     assert all(row.document_id == document["id"] for row in rows)
     assert all(row.token_count > 0 for row in rows)
-    assert all(row.embedding is None for row in rows)  # Day 6 才写向量
+    # Day 6：每个切片都生成固定维度向量，供 pgvector 相似度检索。
+    assert all(row.embedding is not None for row in rows)
 
     detail = client.get(f"/api/v1/knowledge-bases/{knowledge_base_id}/documents/{document['id']}")
     assert detail.status_code == 200

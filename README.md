@@ -34,6 +34,22 @@ tail overlap between consecutive chunks). Chunking and document metadata are
 written in the same transaction, so a document always has a complete set of
 chunks. `Document.chunk_count` and the knowledge base aggregate stay in sync.
 
+Day 6 adds DashScope Embedding and vector retrieval. The application loads the
+local `.env` file and calls `text-embedding-v4` with 1536 dimensions; PostgreSQL
+uses pgvector cosine distance. Tests explicitly use a deterministic hash
+embedding so they do not consume API credits or depend on the network. The debug
+endpoint is `POST /api/v1/knowledge-bases/{id}/retrieval/search`.
+
+Configure a local `.env` (never commit it):
+
+```env
+EMBEDDING_PROVIDER=dashscope
+DASHSCOPE_API_KEY=your-key
+DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/api/v1
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSION=1536
+```
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate

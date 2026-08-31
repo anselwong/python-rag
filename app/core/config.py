@@ -3,6 +3,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
+from dotenv import load_dotenv
+
+# 本地开发从 .env 读取密钥；生产环境通常由容器/部署平台注入环境变量。
+# override=False 保证生产环境显式注入的变量优先级高于本地文件。
+load_dotenv(override=False)
+
 
 def _cors_origins() -> List[str]:
     raw_origins = os.getenv(
