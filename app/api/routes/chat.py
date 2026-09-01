@@ -8,11 +8,11 @@ from typing import Dict
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from app.schemas.chat import ChatRequest, ChatResponse
+from app.schemas.chat import ChatRequest, ChatResponse, ChatSessionRenameRequest
 from app.schemas.chat_stream import ChatStreamRequest
 from app.schemas.retrieval import RetrievalRequest
 from app.services.llm import LLMError, generate_answer, stream_answer
-from app.services.retrieval import search
+from app.services.qa import retrieve_contexts
 from app.core.database import ChatMessage, ChatSession, KnowledgeBase, get_session
 
 router = APIRouter(prefix="/knowledge-bases/{knowledge_base_id}")
@@ -25,9 +25,40 @@ def get_chat_sessions(knowledge_base_id: str) -> list[dict]:
         return [{"id": row.id, "title": row.title, "updated_at": row.updated_at.isoformat(), "messages": [{"id": message.id, "role": message.role, "content": message.content, "created_at": message.created_at.isoformat(), "citations": json.loads(message.citations_json)} for message in sorted(row.messages, key=lambda value: value.created_at)]} for row in rows]
 
 
+@router.patch("/chat-sessions/{session_id}", summary="Rename a chat session")
+def rename_chat_session(knowledge_base_id: str, session_id: str, payload: ChatSessionRenameRequest) -> dict:
+    """修改会话标题，并校验会话属于当前知识库，防止越权修改其他知识库数据。"""
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="会话名称不能为空")
+    with get_session() as session:
+        item = session.query(ChatSession).filter(
+            ChatSession.id == session_id,
+            ChatSession.knowledge_base_id == knowledge_base_id,
+        ).one_or_none()
+        if item is None:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        item.title = title
+        item.updated_at = datetime.now(timezone.utc)
+        return {"id": item.id, "title": item.title, "updated_at": item.updated_at.isoformat()}
+
+
+@router.delete("/chat-sessions/{session_id}", status_code=204, summary="Delete a chat session")
+def delete_chat_session(knowledge_base_id: str, session_id: str) -> None:
+    """删除会话；ORM cascade 与数据库外键会一并删除其消息记录。"""
+    with get_session() as session:
+        item = session.query(ChatSession).filter(
+            ChatSession.id == session_id,
+            ChatSession.knowledge_base_id == knowledge_base_id,
+        ).one_or_none()
+        if item is None:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        session.delete(item)
+
+
 @router.post("/chat", response_model=ChatResponse, summary="Answer with retrieved context")
 def post_chat(knowledge_base_id: str, payload: ChatRequest) -> Dict:
-    contexts = search(knowledge_base_id, payload.message.strip(), top_k=5, score_threshold=0.35)
+    contexts = retrieve_contexts(knowledge_base_id, payload.message.strip())
     try:
         answer = generate_answer(payload.message.strip(), contexts)
     except LLMError as error:
@@ -51,7 +82,7 @@ def post_chat(knowledge_base_id: str, payload: ChatRequest) -> Dict:
 
 @router.post("/chat/stream", summary="Stream answer with Server-Sent Events")
 def post_chat_stream(knowledge_base_id: str, payload: ChatStreamRequest) -> StreamingResponse:
-    contexts = search(knowledge_base_id, payload.message.strip(), top_k=5, score_threshold=0.35)
+    contexts = retrieve_contexts(knowledge_base_id, payload.message.strip())
     try:
         chunks = stream_answer(payload.message.strip(), contexts)
         return StreamingResponse((f"data: {chunk}\n\n" for chunk in chunks), media_type="text/event-stream")

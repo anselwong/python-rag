@@ -31,3 +31,9 @@ class ChatSessionResponse(BaseModel):
     title: str
     updated_at: str
     messages: List[ChatResponse]
+
+
+class ChatSessionRenameRequest(BaseModel):
+    """会话标题修改请求；限制长度避免列表布局被超长文本破坏。"""
+
+    title: str = Field(min_length=1, max_length=120)

@@ -117,10 +117,22 @@ class ChatMessage(Base):
     session: Mapped[ChatSession] = relationship(back_populates="messages")
 
 
+class EvaluationCase(Base):
+    """属于某个知识库的检索评测题；expected_* 是人工确认的金标准。"""
+    __tablename__ = "evaluation_cases"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    knowledge_base_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    expected_page: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 Index("idx_documents_kb", Document.knowledge_base_id)
 Index("idx_chunks_document", Chunk.document_id)
 Index("idx_chat_sessions_kb", ChatSession.knowledge_base_id)
 Index("idx_chat_messages_session", ChatMessage.session_id)
+Index("idx_evaluation_cases_kb", EvaluationCase.knowledge_base_id)
 
 
 def initialize_database() -> None:

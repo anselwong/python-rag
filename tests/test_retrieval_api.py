@@ -15,7 +15,7 @@ def test_vector_search_returns_ranked_chunks(tmp_path: Path) -> None:
     content = "用户登录需要验证码。\n\n退款申请需要订单号。"
     document = client.post(f"/api/v1/knowledge-bases/{kb_id}/documents", files={"file": ("guide.txt", content, "text/plain")}).json()
 
-    response = client.post(f"/api/v1/knowledge-bases/{kb_id}/retrieval/search", json={"query": "用户登录验证码", "top_k": 3, "score_threshold": -1})
+    response = client.post(f"/api/v1/knowledge-bases/{kb_id}/retrieval/search", json={"query": "用户登录验证码", "top_k": 3, "score_threshold": -1, "mode": "hybrid"})
     assert response.status_code == 200
     results = response.json()
     assert results
