@@ -84,7 +84,37 @@ def post_chat(knowledge_base_id: str, payload: ChatRequest) -> Dict:
 def post_chat_stream(knowledge_base_id: str, payload: ChatStreamRequest) -> StreamingResponse:
     contexts = retrieve_contexts(knowledge_base_id, payload.message.strip())
     try:
-        chunks = stream_answer(payload.message.strip(), contexts)
-        return StreamingResponse((f"data: {chunk}\n\n" for chunk in chunks), media_type="text/event-stream")
+        timestamp = datetime.now(timezone.utc)
+        with get_session() as session:
+            if payload.session_id:
+                chat_session = session.query(ChatSession).filter(ChatSession.id == payload.session_id, ChatSession.knowledge_base_id == knowledge_base_id).one_or_none()
+                if chat_session is None:
+                    raise HTTPException(status_code=404, detail="会话不存在")
+            else:
+                chat_session = ChatSession(id=str(uuid.uuid4()), knowledge_base_id=knowledge_base_id, title=payload.message.strip()[:40], created_at=timestamp, updated_at=timestamp)
+                session.add(chat_session)
+                session.flush()
+            session.add(ChatMessage(id=str(uuid.uuid4()), session_id=chat_session.id, role="user", content=payload.message.strip(), created_at=timestamp))
+            session_id = chat_session.id
+
+        def events():
+            # SSE 事件分为元数据、增量文本和结束信息，前端无需猜测字符串含义。
+            yield f"event: meta\ndata: {json.dumps({'session_id': session_id}, ensure_ascii=False)}\n\n"
+            answer_parts = []
+            try:
+                for chunk in stream_answer(payload.message.strip(), contexts):
+                    answer_parts.append(chunk)
+                    yield f"event: delta\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+                answer = "".join(answer_parts)
+                with get_session() as session:
+                    item = session.get(ChatSession, session_id)
+                    if item:
+                        session.add(ChatMessage(id=str(uuid.uuid4()), session_id=session_id, role="assistant", content=answer, citations_json=json.dumps(contexts, ensure_ascii=False), created_at=datetime.now(timezone.utc)))
+                        item.updated_at = datetime.now(timezone.utc)
+                yield f"event: done\ndata: {json.dumps({'citations': contexts}, ensure_ascii=False)}\n\n"
+            except LLMError as error:
+                yield f"event: error\ndata: {json.dumps({'message': str(error)}, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     except LLMError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
