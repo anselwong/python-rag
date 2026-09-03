@@ -13,7 +13,7 @@ from typing import Dict, List
 from fastapi import UploadFile
 
 from app.core.config import settings
-from app.core.database import Chunk, Document, KnowledgeBase, get_session
+from app.core.database import Chunk, Document, KnowledgeBase, LangChainChunk, get_session
 from app.services.chunker import split_pages_into_chunks
 from app.services.embedding import embed_texts
 from app.services.parser import parse_document
@@ -75,12 +75,21 @@ async def ingest_document(knowledge_base_id: str, upload: UploadFile) -> Dict:
 
 
 def delete_document(knowledge_base_id: str, document_id: str) -> None:
-    """先由数据库事务删除元数据，再删除文件；外键级联会清理未来的 chunks。"""
+    """先清理 LangChain 向量，再删除元数据和文件，避免产生孤儿向量。"""
     with get_session() as session:
         item = session.query(Document).filter(Document.id == document_id, Document.knowledge_base_id == knowledge_base_id).one_or_none()
         if item is None:
             raise KeyError("文档不存在")
         stored_path = UPLOAD_DIR / item.stored_name
+        vector_ids = [row.id for row in session.query(LangChainChunk).filter(LangChainChunk.document_id == document_id).all()]
+    from app.langchain.vectorstore import delete_document_vectors
+    from app.langchain.service import embeddings
+    # 先删向量；向量清理失败时保留业务数据，避免出现“文档已删但索引残留”。
+    delete_document_vectors(knowledge_base_id, document_id, embeddings, vector_ids)
+    with get_session() as session:
+        item = session.query(Document).filter(Document.id == document_id, Document.knowledge_base_id == knowledge_base_id).one_or_none()
+        if item is None:
+            raise KeyError("文档不存在")
         session.delete(item)
     stored_path.unlink(missing_ok=True)
 
