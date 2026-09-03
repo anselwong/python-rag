@@ -10,7 +10,7 @@ from fastapi import APIRouter
 
 from app.core.database import Document, EvaluationCase, get_session
 from app.services.evaluation import recall_at_k, reciprocal_rank
-from app.services.qa import retrieve_contexts
+from app.langchain.service import retrieve
 
 router = APIRouter(prefix="/knowledge-bases/{knowledge_base_id}/evaluations")
 
@@ -46,7 +46,7 @@ def _run(knowledge_base_id: str) -> List[dict]:
     results = []
     for item in cases:
         started = time.perf_counter()
-        hits = retrieve_contexts(knowledge_base_id, item["question"], top_k=5, threshold=-1.0, mode="hybrid")
+        hits = retrieve(knowledge_base_id, item["question"], top_k=5, threshold=-1.0, mode="vector")
         elapsed = round((time.perf_counter() - started) * 1000, 2)
         expected = expected_docs[item["id"]]
         hit_ids = [hit["id"] for hit in hits]

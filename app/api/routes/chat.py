@@ -11,8 +11,7 @@ from fastapi.responses import StreamingResponse
 from app.schemas.chat import ChatRequest, ChatResponse, ChatSessionRenameRequest
 from app.schemas.chat_stream import ChatStreamRequest
 from app.schemas.retrieval import RetrievalRequest
-from app.services.llm import LLMError, generate_answer, stream_answer
-from app.services.qa import retrieve_contexts
+from app.langchain.service import answer as lc_answer, answer_stream as lc_answer_stream
 from app.core.database import ChatMessage, ChatSession, KnowledgeBase, get_session
 
 router = APIRouter(prefix="/knowledge-bases/{knowledge_base_id}")
@@ -58,10 +57,9 @@ def delete_chat_session(knowledge_base_id: str, session_id: str) -> None:
 
 @router.post("/chat", response_model=ChatResponse, summary="Answer with retrieved context")
 def post_chat(knowledge_base_id: str, payload: ChatRequest) -> Dict:
-    contexts = retrieve_contexts(knowledge_base_id, payload.message.strip())
     try:
-        answer = generate_answer(payload.message.strip(), contexts)
-    except LLMError as error:
+        answer, contexts = lc_answer(knowledge_base_id, payload.message.strip(), session_id=payload.session_id)
+    except Exception as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
     timestamp = datetime.now(timezone.utc)
     with get_session() as session:
@@ -82,8 +80,8 @@ def post_chat(knowledge_base_id: str, payload: ChatRequest) -> Dict:
 
 @router.post("/chat/stream", summary="Stream answer with Server-Sent Events")
 def post_chat_stream(knowledge_base_id: str, payload: ChatStreamRequest) -> StreamingResponse:
-    contexts = retrieve_contexts(knowledge_base_id, payload.message.strip())
     try:
+        stream, contexts = lc_answer_stream(knowledge_base_id, payload.message.strip())
         timestamp = datetime.now(timezone.utc)
         with get_session() as session:
             if payload.session_id:
@@ -102,7 +100,7 @@ def post_chat_stream(knowledge_base_id: str, payload: ChatStreamRequest) -> Stre
             yield f"event: meta\ndata: {json.dumps({'session_id': session_id}, ensure_ascii=False)}\n\n"
             answer_parts = []
             try:
-                for chunk in stream_answer(payload.message.strip(), contexts):
+                for chunk in stream:
                     answer_parts.append(chunk)
                     yield f"event: delta\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
                 answer = "".join(answer_parts)
@@ -112,9 +110,9 @@ def post_chat_stream(knowledge_base_id: str, payload: ChatStreamRequest) -> Stre
                         session.add(ChatMessage(id=str(uuid.uuid4()), session_id=session_id, role="assistant", content=answer, citations_json=json.dumps(contexts, ensure_ascii=False), created_at=datetime.now(timezone.utc)))
                         item.updated_at = datetime.now(timezone.utc)
                 yield f"event: done\ndata: {json.dumps({'citations': contexts}, ensure_ascii=False)}\n\n"
-            except LLMError as error:
+            except Exception as error:
                 yield f"event: error\ndata: {json.dumps({'message': str(error)}, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-    except LLMError as error:
+    except Exception as error:
         raise HTTPException(status_code=502, detail=str(error)) from error

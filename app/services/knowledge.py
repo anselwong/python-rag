@@ -69,42 +69,9 @@ def get_document(document_id: str) -> Dict:
 
 async def ingest_document(knowledge_base_id: str, upload: UploadFile) -> Dict:
     """校验、保存、解析并原子写入文档元数据；失败会删除已保存文件。"""
-    original_name = Path(upload.filename or "未命名").name
-    extension = Path(original_name).suffix.lower()
-    if extension not in settings.allowed_extensions:
-        raise ValueError("仅支持 PDF、DOCX、MD、TXT 文件")
-
-    document_id = str(uuid.uuid4())
-    destination = UPLOAD_DIR / f"{document_id}{extension}"
-    size = 0
-    try:
-        with destination.open("wb") as target:
-            while chunk := await upload.read(1024 * 1024):
-                size += len(chunk)
-                if size > settings.max_upload_size:
-                    raise ValueError("文件大小不能超过 20 MB")
-                target.write(chunk)
-        pages = [{"page": page, "text": text} for page, text in parse_document(destination, extension)]
-        # Day 5：解析完成后立即切片。切片与文档元数据在同一个事务里写入，
-        # 保证"文档存在则切片必完整"，不会出现有文档无切片的半写入状态。
-        chunks = split_pages_into_chunks([(page["page"], page["text"]) for page in pages])
-        timestamp = now_utc()
-        with get_session() as session:
-            knowledge_base = session.get(KnowledgeBase, knowledge_base_id)
-            if knowledge_base is None:
-                raise KeyError("知识库不存在")
-            session.add(Document(id=document_id, knowledge_base_id=knowledge_base_id, name=original_name, stored_name=destination.name, file_type=extension[1:].upper(), size_bytes=size, chunk_count=len(chunks), status="ready", pages_json=json.dumps(pages, ensure_ascii=False), created_at=timestamp))
-            # chunk id 用 document_id-序号 而非随机 uuid：可读、可追溯到文档，
-            # 且同一文档将来重新切片时天然幂等（同 id 覆盖旧记录）。
-            # 同一批切片一次性向量化，避免 N 个切片触发 N 次远程 API 调用。
-            vectors = embed_texts([chunk["content"] for chunk in chunks])
-            for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
-                session.add(Chunk(id=f"{document_id}-{index}", document_id=document_id, page=chunk["page"], content=chunk["content"], token_count=chunk["token_count"], embedding=vector))
-            knowledge_base.updated_at = timestamp
-    except Exception:
-        destination.unlink(missing_ok=True)
-        raise
-    return get_document(document_id)
+    # LangChain 分支由 app.langchain.service 负责 Loader/Splitter/Embedding 全链路。
+    from app.langchain.service import ingest
+    return await ingest(knowledge_base_id, upload)
 
 
 def delete_document(knowledge_base_id: str, document_id: str) -> None:
@@ -124,6 +91,8 @@ def reindex_embeddings(knowledge_base_id: str) -> int:
     更换模型、版本或维度后，旧向量处于不同语义空间，不能与新查询向量混检；
     因此必须对所有切片重建。先在事务外调用远程模型，避免网络等待长期占用数据库事务。
     """
+    from app.langchain.service import embeddings, similarity_search
+    # LangChain VectorStore 的重建由上传/管理任务负责；这里保留旧 API 名称，改为批量刷新共享兼容表。
     with get_session() as session:
         knowledge_base = session.get(KnowledgeBase, knowledge_base_id)
         if knowledge_base is None:

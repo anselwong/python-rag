@@ -94,6 +94,24 @@ class Chunk(Base):
     document: Mapped["Document"] = relationship(back_populates="chunks")
 
 
+class LangChainChunk(Base):
+    """LangChain 分支专用切片表。
+
+    与手写版 chunks 隔离，允许两条分支共用文档元数据但不会互相覆盖向量。
+    embedding 在 PostgreSQL 中使用 pgvector；SQLite 测试替身使用 JSON 文本。
+    """
+    __tablename__ = "langchain_chunks"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    knowledge_base_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False)
+    page: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding = mapped_column(Vector(1536) if Vector else Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+
 class ChatSession(Base):
     """一条可持续的对话线程，归属于知识库。"""
     __tablename__ = "chat_sessions"
@@ -130,6 +148,8 @@ class EvaluationCase(Base):
 
 Index("idx_documents_kb", Document.knowledge_base_id)
 Index("idx_chunks_document", Chunk.document_id)
+Index("idx_langchain_chunks_kb", LangChainChunk.knowledge_base_id)
+Index("idx_langchain_chunks_document", LangChainChunk.document_id)
 Index("idx_chat_sessions_kb", ChatSession.knowledge_base_id)
 Index("idx_chat_messages_session", ChatMessage.session_id)
 Index("idx_evaluation_cases_kb", EvaluationCase.knowledge_base_id)
