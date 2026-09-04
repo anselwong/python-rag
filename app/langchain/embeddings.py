@@ -18,8 +18,13 @@ class BailianEmbeddings(Embeddings):
         key=os.getenv("DASHSCOPE_API_KEY"); base=os.getenv("DASHSCOPE_BASE_URL")
         if not key or not base: raise RuntimeError("缺少 DASHSCOPE_API_KEY 或 DASHSCOPE_BASE_URL")
         dim=int(os.getenv("EMBEDDING_DIMENSION", "1536")); dashscope.api_key=key; dashscope.base_http_api_url=base
-        response=TextEmbedding.call(model=os.getenv("EMBEDDING_MODEL", "text-embedding-v4"), input=texts, dimension=dim)
-        if response.status_code != 200: raise RuntimeError(f"Embedding 调用失败: {response.status_code}")
-        return [item["embedding"] for item in response.output["embeddings"]]
+        # 百炼限制单次请求最多 10 条文本，超限返回 400，必须分批调用。
+        out: List[List[float]] = []
+        for start in range(0, len(texts), 10):
+            batch=texts[start:start+10]
+            response=TextEmbedding.call(model=os.getenv("EMBEDDING_MODEL", "text-embedding-v4"), input=batch, dimension=dim)
+            if response.status_code != 200: raise RuntimeError(f"Embedding 调用失败: {response.status_code} {getattr(response, 'code', '')} {getattr(response, 'message', '')}")
+            out.extend(item["embedding"] for item in response.output["embeddings"])
+        return out
     def embed_documents(self, texts: List[str]) -> List[List[float]]: return self._embed(texts)
     def embed_query(self, text: str) -> List[float]: return self._embed([text])[0]
