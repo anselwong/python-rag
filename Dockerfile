@@ -12,8 +12,10 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY app ./app
+
 # 基础镜像自带 pip 可能无法正确解析较新的 PEP 517 依赖元数据；先升级打包工具，
 # 并优先使用 PyPI 的预编译 wheel，避免线上构建 C 扩展和依赖解析失败。
+
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && python -m pip install --no-cache-dir --prefer-binary .
 
