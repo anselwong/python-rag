@@ -4,13 +4,16 @@ FROM python:3.11-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+    PIP_DEFAULT_TIMEOUT=120 \
     RAG_DATA_DIR=/var/lib/rag
 
 WORKDIR /app
 
 COPY pyproject.toml ./
 COPY app ./app
-RUN pip install --no-cache-dir .
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && python -m pip install --no-cache-dir --prefer-binary .
 
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /var/lib/rag/uploads \
