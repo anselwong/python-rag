@@ -1,4 +1,4 @@
-"""按知识库隔离的检索评测接口（Day 12）。"""
+"""按知识库隔离的检索评测接口（Day 12/13）。"""
 
 import json
 import time
@@ -9,7 +9,8 @@ from typing import List
 from fastapi import APIRouter
 
 from app.core.database import Document, EvaluationCase, get_session
-from app.services.evaluation import recall_at_k, reciprocal_rank
+from app.schemas.evaluation import DEFAULT_SWEEP_CONFIGS, SweepConfig, SweepRequest
+from app.services.evaluation import mean, recall_at_k, reciprocal_rank
 from app.langchain.service import retrieve
 
 router = APIRouter(prefix="/knowledge-bases/{knowledge_base_id}/evaluations")
@@ -71,3 +72,77 @@ def generate_evaluations(knowledge_base_id: str) -> List[dict]:
 @router.post("/run", summary="Run knowledge-base retrieval evaluation")
 def run_evaluations(knowledge_base_id: str) -> List[dict]:
     return _run(knowledge_base_id)
+
+
+def _run_single(knowledge_base_id: str, question: str, expected_document_id: str, config: SweepConfig) -> dict:
+    """按单组配置跑一道评测题，返回命中判定与指标明细。"""
+    started = time.perf_counter()
+    hits = retrieve(
+        knowledge_base_id,
+        question,
+        top_k=config.top_k,
+        threshold=config.threshold,
+        mode=config.mode,
+        vector_weight=config.vector_weight,
+        keyword_weight=config.keyword_weight,
+    )
+    elapsed = round((time.perf_counter() - started) * 1000, 2)
+    # 金标准匹配沿用 Day 12 约定：chunk id 以文档 id 为前缀（f"{did}-{i}"）。
+    matching = [hit for hit in hits if hit["id"].startswith(expected_document_id + "-")]
+    hit_ids = [hit["id"] for hit in hits]
+    first_id = matching[0]["id"] if matching else ""
+    return {
+        "recall_at_k": recall_at_k(hit_ids, first_id, config.top_k),
+        "mrr": reciprocal_rank(hit_ids, first_id),
+        "retrieval_score": matching[0]["score"] if matching else None,
+        "latency_ms": elapsed,
+    }
+
+
+@router.post("/sweep", summary="Sweep retrieval configs and compare Recall@K / MRR")
+def sweep_evaluations(knowledge_base_id: str, payload: SweepRequest) -> dict:
+    """Day 13 评测深化：一次运行多组配置，横向比较召回质量并给出建议。
+
+    每组配置独立跑全部评测题，聚合 Recall@K、MRR、平均延迟和命中率；
+    结果按 Recall@K 降序排列，附带阈值校准建议（默认 0.35 是否合适）。
+    """
+    cases = _ensure_cases(knowledge_base_id)
+    with get_session() as session:
+        expected_docs = {
+            item.id: item.expected_document_id
+            for item in session.query(EvaluationCase).filter(EvaluationCase.knowledge_base_id == knowledge_base_id).all()
+        }
+    configs = payload.configs or DEFAULT_SWEEP_CONFIGS
+    results = []
+    for config in configs:
+        metrics = [
+            _run_single(knowledge_base_id, case["question"], expected_docs[case["id"]], config)
+            for case in cases
+        ]
+        scores = [m["retrieval_score"] for m in metrics if m["retrieval_score"] is not None]
+        results.append({
+            "mode": config.mode,
+            "vector_weight": config.vector_weight,
+            "keyword_weight": config.keyword_weight,
+            "threshold": config.threshold,
+            "top_k": config.top_k,
+            "recall_at_k": round(mean(m["recall_at_k"] for m in metrics), 4),
+            "mrr": round(mean(m["mrr"] for m in metrics), 4),
+            "avg_latency_ms": round(mean(m["latency_ms"] for m in metrics), 2),
+            "avg_score": round(mean(scores), 4) if scores else None,
+            "min_score": min(scores) if scores else None,
+        })
+    results.sort(key=lambda item: (item["recall_at_k"], item["mrr"]), reverse=True)
+    best = results[0] if results else None
+    # 阈值校准建议：命中分数的最小值是"不丢正确结果"的安全上限。
+    return {
+        "knowledge_base_id": knowledge_base_id,
+        "case_count": len(cases),
+        "results": results,
+        "best": best,
+        "threshold_advice": {
+            "current_default": 0.35,
+            "safe_upper_bound": best["min_score"] if best and best["min_score"] is not None else None,
+            "note": "safe_upper_bound 为最优配置下所有命中分数的最小值；默认阈值高于该值会开始丢正确结果，低于该值则安全。阈值应结合业务容错在 min_score 与 avg_score 之间选取。",
+        },
+    }

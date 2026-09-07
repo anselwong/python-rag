@@ -10,6 +10,9 @@ class RetrievalRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20)
     score_threshold: float = Field(default=0.0, ge=-1.0, le=1.0)
     mode: Literal["vector", "hybrid"] = "vector"
+    # Day 13：hybrid 融合权重可选透传；缺省时后端读 HYBRID_*_WEIGHT 环境变量。
+    vector_weight: float = Field(default=None, ge=0.0, le=1.0)
+    keyword_weight: float = Field(default=None, ge=0.0, le=1.0)
 
 
 class RetrievalResultResponse(BaseModel):
