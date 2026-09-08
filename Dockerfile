@@ -6,7 +6,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
     PIP_DEFAULT_TIMEOUT=120 \
-    RAG_DATA_DIR=/var/lib/rag
+    RAG_DATA_DIR=/var/lib/rag \
+    TIKTOKEN_CACHE_DIR=/opt/tiktoken
 
 WORKDIR /app
 
@@ -18,6 +19,12 @@ COPY app ./app
 
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && python -m pip install --no-cache-dir --prefer-binary .
+
+# tiktoken 的词表首次使用需要下载。构建期预热并固定缓存路径，保证运行容器
+# 不依赖外网，也不会在第一次用户问答时因缺少词表失败。
+RUN mkdir -p "$TIKTOKEN_CACHE_DIR" \
+    && python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" \
+    && chmod -R a+rX "$TIKTOKEN_CACHE_DIR"
 
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /var/lib/rag/uploads \

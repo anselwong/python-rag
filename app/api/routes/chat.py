@@ -20,7 +20,7 @@ router = APIRouter(prefix="/knowledge-bases/{knowledge_base_id}")
 def get_chat_sessions(knowledge_base_id: str) -> list[dict]:
     with get_session() as session:
         rows = session.query(ChatSession).filter(ChatSession.knowledge_base_id == knowledge_base_id).order_by(ChatSession.updated_at.desc()).all()
-        return [{"id": row.id, "title": row.title, "updated_at": row.updated_at.isoformat(), "messages": [{"id": message.id, "role": message.role, "content": message.content, "created_at": message.created_at.isoformat(), "citations": json.loads(message.citations_json)} for message in sorted(row.messages, key=lambda value: value.created_at)]} for row in rows]
+        return [{"id": row.id, "title": row.title, "updated_at": row.updated_at.isoformat(), "messages": [{"id": message.id, "role": message.role, "content": message.content, "created_at": message.created_at.isoformat(), "citations": json.loads(message.citations_json), "usage": json.loads(message.usage_json)} for message in sorted(row.messages, key=lambda value: value.created_at)]} for row in rows]
 
 
 @router.patch("/chat-sessions/{session_id}", summary="Rename a chat session")
@@ -57,7 +57,7 @@ def delete_chat_session(knowledge_base_id: str, session_id: str) -> None:
 @router.post("/chat", response_model=ChatResponse, summary="Answer with retrieved context")
 def post_chat(knowledge_base_id: str, payload: ChatRequest) -> Dict:
     try:
-        answer, contexts, session_id, message_id = lc_answer(
+        answer, contexts, session_id, message_id, usage = lc_answer(
             knowledge_base_id,
             payload.message.strip(),
             session_id=payload.session_id,
@@ -66,13 +66,13 @@ def post_chat(knowledge_base_id: str, payload: ChatRequest) -> Dict:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
-    return {"id": message_id, "session_id": session_id, "role": "assistant", "content": answer, "citations": contexts}
+    return {"id": message_id, "session_id": session_id, "role": "assistant", "content": answer, "citations": contexts, "usage": usage}
 
 
 @router.post("/chat/stream", summary="Stream answer with Server-Sent Events")
 def post_chat_stream(knowledge_base_id: str, payload: ChatStreamRequest) -> StreamingResponse:
     try:
-        stream, contexts, session_id = lc_answer_stream(
+        stream, contexts, session_id, usage = lc_answer_stream(
             knowledge_base_id,
             payload.message.strip(),
             session_id=payload.session_id,
@@ -84,7 +84,8 @@ def post_chat_stream(knowledge_base_id: str, payload: ChatStreamRequest) -> Stre
             try:
                 for chunk in stream:
                     yield f"event: delta\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
-                yield f"event: done\ndata: {json.dumps({'citations': contexts}, ensure_ascii=False)}\n\n"
+                # 只有流完整结束后才能确认 usage；前端据此展示真实输入/输出消费。
+                yield f"event: done\ndata: {json.dumps({'citations': contexts, 'usage': usage.value}, ensure_ascii=False)}\n\n"
             except Exception as error:
                 yield f"event: error\ndata: {json.dumps({'message': str(error)}, ensure_ascii=False)}\n\n"
 

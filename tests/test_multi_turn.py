@@ -51,9 +51,10 @@ def test_runnable_history_persists_question_answer_and_citations(tmp_path, monke
         "id": "chunk-1", "document_name": "知识.md", "page": 1, "content": "证据", "score": 0.9,
     }])
 
-    answer, citations, session_id, message_id = service.answer(kb_id, "请根据资料回答")
+    answer, citations, session_id, message_id, usage = service.answer(kb_id, "请根据资料回答")
     assert answer == "模拟回答"
     assert citations[0]["id"] == "chunk-1"
+    assert usage is None
 
     with database.get_session() as session:
         rows = session.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at).all()
@@ -88,8 +89,9 @@ def test_streaming_history_persists_only_after_stream_finishes(tmp_path, monkeyp
         "id": "chunk-stream", "document_name": "流式.md", "page": 2, "content": "流式证据", "score": 0.8,
     }])
 
-    stream, _, session_id = service.answer_stream(kb_id, "流式问题")
+    stream, _, session_id, usage = service.answer_stream(kb_id, "流式问题")
     assert "".join(stream) == "流式回答"
+    assert usage.value is None
 
     with database.get_session() as session:
         rows = session.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at).all()

@@ -66,3 +66,27 @@ Run tests with:
 ```bash
 pytest
 ```
+
+## Token 预算
+
+LangChain 分支使用本地 `tiktoken` 的 `cl100k_base` 编码计算 Token：切片按
+`CHUNK_SIZE_TOKENS`/`CHUNK_OVERLAP_TOKENS` 控制，聊天历史、检索上下文和输出
+预留共同受 `LLM_CONTEXT_WINDOW` 约束。它用于在调用模型前裁剪 Prompt；模型实际
+计费 Token 仍需以 DeepSeek 等服务响应中的 `usage` 为准。
+
+升级后为已有数据回填 Token 数：
+
+```bash
+.venv/bin/python scripts/backfill_token_counts.py
+```
+
+## 真实模型用量
+
+问答链以 `ChatOpenAI(stream_usage=True)` 请求 DeepSeek 在响应中返回真实
+`prompt_tokens`、`completion_tokens` 和 `total_tokens`。普通接口直接在 JSON
+响应中返回；流式接口在 SSE 的 `done` 事件返回；两种路径都会写入
+`chat_messages.usage_json`，会话恢复后仍可展示。
+
+首次启动新版本会自动为既有 `chat_messages` 表补充 `usage_json` 列。无需新增
+`.env` 配置或 API Key。若供应商某次未返回 usage，页面不显示用量，不会拿本地
+tokenizer 估算值替代。

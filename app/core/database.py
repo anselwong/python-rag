@@ -131,6 +131,9 @@ class ChatMessage(Base):
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     citations_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    # 仅保存模型服务实际返回的 usage；本地 tokenizer 的调用前预算不写入这里，
+    # 避免“估算值”和账单级真实用量在页面或统计中被混为一谈。
+    usage_json: Mapped[str] = mapped_column(Text, default="null", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     session: Mapped[ChatSession] = relationship(back_populates="messages")
 
@@ -161,6 +164,15 @@ def initialize_database() -> None:
         if DATABASE_URL.startswith("postgresql"):
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.create_all(engine)
+    # create_all 不会为已存在的表增加新列。项目尚未引入 Alembic，因此在启动时
+    # 做一次幂等的小迁移，确保已部署环境也能持久化模型真实 Token 用量。
+    with engine.begin() as connection:
+        if DATABASE_URL.startswith("postgresql"):
+            connection.execute(text("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS usage_json TEXT NOT NULL DEFAULT 'null'"))
+        elif DATABASE_URL.startswith("sqlite"):
+            columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(chat_messages)")}
+            if "usage_json" not in columns:
+                connection.execute(text("ALTER TABLE chat_messages ADD COLUMN usage_json TEXT NOT NULL DEFAULT 'null'"))
 
 
 @contextmanager

@@ -14,6 +14,8 @@ from .chain import run as chain_run, stream as chain_stream
 from app.core.config import settings
 from app.core.database import ChatSession, Document as DbDocument, Chunk, LangChainChunk, KnowledgeBase, get_session
 from .history import SqlChatMessageHistory
+from .prompts import SYSTEM_PROMPT
+from .tokenizer import count_tokens, fit_contexts_to_budget
 
 UPLOAD_DIR = settings.data_dir / "uploads"; UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 embeddings = BailianEmbeddings()
@@ -46,10 +48,12 @@ async def ingest(knowledge_base_id: str, upload: UploadFile) -> dict:
             # LangChainChunk 没有 ORM relationship，显式 flush 保证父文档先于子切片插入。
             session.flush()
             # 仅保存可审计的切片元数据；向量正文由 LangChain PGVector 管理。
+            # token_count 使用本地 tokenizer，不再把 Python 字符数错误标成 Token。
             for i, doc in enumerate(chunks):
-                session.add(LangChainChunk(id=f"{did}-{i}",document_id=did,knowledge_base_id=knowledge_base_id,page=int(doc.metadata.get("page",1)),content=doc.page_content,token_count=len(doc.page_content),created_at=timestamp))
+                token_count = count_tokens(doc.page_content)
+                session.add(LangChainChunk(id=f"{did}-{i}",document_id=did,knowledge_base_id=knowledge_base_id,page=int(doc.metadata.get("page",1)),content=doc.page_content,token_count=token_count,created_at=timestamp))
                 # 旧 chunks 仅作为共用文档管理/迁移数据，不参与 LangChain 检索。
-                session.add(Chunk(id=f"{did}-{i}", document_id=did, page=int(doc.metadata.get("page",1)), content=doc.page_content, token_count=len(doc.page_content), embedding=embeddings.embed_query(doc.page_content)))
+                session.add(Chunk(id=f"{did}-{i}", document_id=did, page=int(doc.metadata.get("page",1)), content=doc.page_content, token_count=token_count, embedding=embeddings.embed_query(doc.page_content)))
             kb.updated_at=timestamp
         return {"id":did,"knowledge_base_id":knowledge_base_id,"name":name,"type":ext[1:].upper(),"size":f"{max(1,round(size/1024))} KB","chunk_count":len(chunks),"status":"ready","created_at":timestamp}
     except Exception:
@@ -159,16 +163,17 @@ def ensure_chat_session(knowledge_base_id: str, question: str, session_id: Optio
         return item.id
 
 
-def answer(kb_id: str, question: str, top_k: int = 5, session_id: Optional[str] = None) -> tuple[str, list[dict], str, str]:
+def answer(kb_id: str, question: str, top_k: int = 5, session_id: Optional[str] = None) -> tuple[str, list[dict], str, str, Optional[dict]]:
     """普通问答：Runnable 自动读写消息，服务层仅回填本轮检索引用。"""
     resolved_session_id = ensure_chat_session(kb_id, question, session_id)
     history = SqlChatMessageHistory(resolved_session_id)
     contexts = retrieve_for_answer(kb_id, question, top_k)
-    response = chain_run(question, contexts, history)
-    history.attach_citations(contexts)
+    prompt_contexts = fit_contexts_to_budget(question, history.messages, contexts, SYSTEM_PROMPT)
+    response, usage = chain_run(question, prompt_contexts, history)
+    history.attach_response_metadata(contexts, usage)
     if not history.last_assistant_message_id:
         raise RuntimeError("LangChain 未保存助手消息")
-    return response, contexts, resolved_session_id, history.last_assistant_message_id
+    return response, contexts, resolved_session_id, history.last_assistant_message_id, usage
 
 
 def answer_stream(kb_id: str, question: str, top_k: int = 5, session_id: Optional[str] = None):
@@ -176,13 +181,14 @@ def answer_stream(kb_id: str, question: str, top_k: int = 5, session_id: Optiona
     resolved_session_id = ensure_chat_session(kb_id, question, session_id)
     history = SqlChatMessageHistory(resolved_session_id)
     contexts = retrieve_for_answer(kb_id, question, top_k)
-    stream = chain_stream(question, contexts, history)
+    prompt_contexts = fit_contexts_to_budget(question, history.messages, contexts, SYSTEM_PROMPT)
+    stream, stream_usage = chain_stream(question, prompt_contexts, history)
 
     def complete_stream():
         # 只有消费者正常读完流时 Runnable 才会写入完整回答；异常或断流不会留下
         # 半截助手消息，引用也只会绑定到已经成功写入的那一条回答。
         for chunk in stream:
             yield chunk
-        history.attach_citations(contexts)
+        history.attach_response_metadata(contexts, stream_usage.value)
 
-    return complete_stream(), contexts, resolved_session_id
+    return complete_stream(), contexts, resolved_session_id, stream_usage

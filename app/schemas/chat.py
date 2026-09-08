@@ -18,12 +18,21 @@ class CitationResponse(BaseModel):
     score: float
 
 
+class TokenUsageResponse(BaseModel):
+    """模型服务真实返回的本次用量，不是本地 tokenizer 估算。"""
+
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
 class ChatResponse(BaseModel):
     session_id: str
     id: str
     role: str
     content: str
     citations: List[CitationResponse]
+    usage: Optional[TokenUsageResponse] = None
 
 
 class ChatSessionResponse(BaseModel):
