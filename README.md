@@ -61,6 +61,17 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 The API is available at `http://127.0.0.1:8000`; interactive documentation is at
 `http://127.0.0.1:8000/docs`.
 
+## 登录和知识库私有化
+
+除健康检查外的接口需要 JWT Bearer Token。首次启动会自动创建初始账号
+`admin`，密码为 `admin`，并将已有的无归属知识库回填给该账号；上线后应立即
+修改密码（当前版本暂未提供改密接口）并设置随机的 `JWT_SECRET` 环境变量。
+注册用户只有统一的 `user` 角色，每个用户只能看到自己创建的知识库及其文档、
+聊天和评测数据。JWT 默认有效期为 24 小时，可通过 `JWT_EXPIRE_SECONDS` 调整。
+
+前端 Token 暂存在浏览器 `localStorage`，生产环境必须启用 HTTPS，并避免在不可信
+脚本环境中部署；后续如需更高安全性，可迁移为 HttpOnly Cookie + CSRF 防护。
+
 Run tests with:
 
 ```bash

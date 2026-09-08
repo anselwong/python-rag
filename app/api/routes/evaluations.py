@@ -6,12 +6,22 @@ import uuid
 from datetime import datetime, timezone
 from typing import List
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.database import Document, EvaluationCase, get_session
 from app.schemas.evaluation import DEFAULT_SWEEP_CONFIGS, SweepConfig, SweepRequest
 from app.services.evaluation import mean, recall_at_k, reciprocal_rank
 from app.langchain.service import retrieve
+from app.core.database import User
+from app.api.dependencies import get_current_user
+from app.services.knowledge import ensure_knowledge_base_owner
+
+
+def _check_owner(knowledge_base_id: str, user_id: str) -> None:
+    try:
+        ensure_knowledge_base_owner(knowledge_base_id, user_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 router = APIRouter(prefix="/knowledge-bases/{knowledge_base_id}/evaluations")
 
@@ -58,19 +68,22 @@ def _run(knowledge_base_id: str) -> List[dict]:
 
 
 @router.get("", summary="List knowledge-base evaluation cases")
-def list_evaluations(knowledge_base_id: str) -> List[dict]:
+def list_evaluations(knowledge_base_id: str, current_user: User = Depends(get_current_user)) -> List[dict]:
+    _check_owner(knowledge_base_id, current_user.id)
     return _ensure_cases(knowledge_base_id)
 
 
 @router.post("/generate", summary="Generate evaluation cases from documents")
-def generate_evaluations(knowledge_base_id: str) -> List[dict]:
+def generate_evaluations(knowledge_base_id: str, current_user: User = Depends(get_current_user)) -> List[dict]:
+    _check_owner(knowledge_base_id, current_user.id)
     with get_session() as session:
         session.query(EvaluationCase).filter(EvaluationCase.knowledge_base_id == knowledge_base_id).delete(synchronize_session=False)
     return _generate_cases(knowledge_base_id)
 
 
 @router.post("/run", summary="Run knowledge-base retrieval evaluation")
-def run_evaluations(knowledge_base_id: str) -> List[dict]:
+def run_evaluations(knowledge_base_id: str, current_user: User = Depends(get_current_user)) -> List[dict]:
+    _check_owner(knowledge_base_id, current_user.id)
     return _run(knowledge_base_id)
 
 
@@ -100,12 +113,13 @@ def _run_single(knowledge_base_id: str, question: str, expected_document_id: str
 
 
 @router.post("/sweep", summary="Sweep retrieval configs and compare Recall@K / MRR")
-def sweep_evaluations(knowledge_base_id: str, payload: SweepRequest) -> dict:
+def sweep_evaluations(knowledge_base_id: str, payload: SweepRequest, current_user: User = Depends(get_current_user)) -> dict:
     """Day 13 评测深化：一次运行多组配置，横向比较召回质量并给出建议。
 
     每组配置独立跑全部评测题，聚合 Recall@K、MRR、平均延迟和命中率；
     结果按 Recall@K 降序排列，附带阈值校准建议（默认 0.35 是否合适）。
     """
+    _check_owner(knowledge_base_id, current_user.id)
     cases = _ensure_cases(knowledge_base_id)
     with get_session() as session:
         expected_docs = {

@@ -17,7 +17,10 @@ def make_client(tmp_path: Path) -> TestClient:
     knowledge.UPLOAD_DIR = tmp_path / "uploads"
     knowledge.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     database.initialize_database()
-    return TestClient(app)
+    client = TestClient(app)
+    token = client.post("/api/v1/auth/login", json={"username": "admin", "password": "admin"}).json()["access_token"]
+    client.headers.update({"Authorization": f"Bearer {token}"})
+    return client
 
 
 def test_health_check() -> None:

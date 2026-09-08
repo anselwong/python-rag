@@ -13,6 +13,8 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY app ./app
+# 运维回填脚本与应用代码一同进入镜像，便于在容器内对已有数据执行安全迁移。
+COPY scripts ./scripts
 
 # 基础镜像自带 pip 可能无法正确解析较新的 PEP 517 依赖元数据；先升级打包工具，
 # 并优先使用 PyPI 的预编译 wheel，避免线上构建 C 扩展和依赖解析失败。

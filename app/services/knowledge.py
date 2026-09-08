@@ -8,7 +8,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from fastapi import UploadFile
 
@@ -27,17 +27,20 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def list_knowledge_bases() -> List[Dict]:
+def list_knowledge_bases(owner_user_id: Optional[str] = None) -> List[Dict]:
     with get_session() as session:
-        items = session.query(KnowledgeBase).order_by(KnowledgeBase.updated_at.desc()).all()
+        query = session.query(KnowledgeBase).order_by(KnowledgeBase.updated_at.desc())
+        if owner_user_id is not None:
+            query = query.filter(KnowledgeBase.owner_user_id == owner_user_id)
+        items = query.all()
         return [_knowledge_row(item) for item in items]
 
 
-def create_knowledge_base(name: str, description: str) -> Dict:
+def create_knowledge_base(name: str, description: str, owner_user_id: Optional[str] = None) -> Dict:
     timestamp = now_utc()
     with get_session() as session:
         count = session.query(KnowledgeBase).count()
-        item = KnowledgeBase(id=str(uuid.uuid4()), name=name, description=description, color=COLORS[count % len(COLORS)], created_at=timestamp, updated_at=timestamp)
+        item = KnowledgeBase(id=str(uuid.uuid4()), owner_user_id=owner_user_id, name=name, description=description, color=COLORS[count % len(COLORS)], created_at=timestamp, updated_at=timestamp)
         session.add(item)
         session.flush()
         return _knowledge_row(item)
@@ -47,6 +50,17 @@ def list_documents(knowledge_base_id: str) -> List[Dict]:
     with get_session() as session:
         items = session.query(Document).filter(Document.knowledge_base_id == knowledge_base_id).order_by(Document.created_at.desc()).all()
         return [_document_row(item) for item in items]
+
+
+def ensure_knowledge_base_owner(knowledge_base_id: str, owner_user_id: str) -> None:
+    """在进入文档、聊天、检索和评测链路前校验知识库私有归属。"""
+    with get_session() as session:
+        exists = session.query(KnowledgeBase.id).filter(
+            KnowledgeBase.id == knowledge_base_id,
+            KnowledgeBase.owner_user_id == owner_user_id,
+        ).one_or_none()
+    if exists is None:
+        raise KeyError("知识库不存在")
 
 
 def get_document(document_id: str) -> Dict:

@@ -8,11 +8,13 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Iterator
+from typing import Iterator, Optional
 
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
+
+from app.core.security import hash_password
 
 try:
     from pgvector.sqlalchemy import Vector
@@ -49,14 +51,28 @@ class Base(DeclarativeBase):
     pass
 
 
+class User(Base):
+    """单角色用户；当前阶段每个用户只拥有自己的知识库。"""
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    username: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    knowledge_bases: Mapped[list["KnowledgeBase"]] = relationship(back_populates="owner")
+
+
 class KnowledgeBase(Base):
     __tablename__ = "knowledge_bases"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    # 暂时允许 NULL 以兼容已有部署；initialize_database 会回填给 admin。
+    owner_user_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     color: Mapped[str] = mapped_column(String(16), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    owner: Mapped[User] = relationship(back_populates="knowledge_bases")
     documents: Mapped[list["Document"]] = relationship(back_populates="knowledge_base", cascade="all, delete-orphan")
 
 
@@ -150,6 +166,7 @@ class EvaluationCase(Base):
 
 
 Index("idx_documents_kb", Document.knowledge_base_id)
+Index("idx_knowledge_bases_owner", KnowledgeBase.owner_user_id)
 Index("idx_chunks_document", Chunk.document_id)
 Index("idx_langchain_chunks_kb", LangChainChunk.knowledge_base_id)
 Index("idx_langchain_chunks_document", LangChainChunk.document_id)
@@ -164,6 +181,8 @@ def initialize_database() -> None:
         if DATABASE_URL.startswith("postgresql"):
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.create_all(engine)
+    _migrate_auth_columns()
+    _ensure_admin_user()
     # create_all 不会为已存在的表增加新列。项目尚未引入 Alembic，因此在启动时
     # 做一次幂等的小迁移，确保已部署环境也能持久化模型真实 Token 用量。
     with engine.begin() as connection:
@@ -173,6 +192,32 @@ def initialize_database() -> None:
             columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(chat_messages)")}
             if "usage_json" not in columns:
                 connection.execute(text("ALTER TABLE chat_messages ADD COLUMN usage_json TEXT NOT NULL DEFAULT 'null'"))
+
+
+def _migrate_auth_columns() -> None:
+    """为已存在的 knowledge_bases 表补 owner_user_id，保持启动迁移幂等。"""
+    with engine.begin() as connection:
+        if DATABASE_URL.startswith("postgresql"):
+            connection.execute(text("ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS owner_user_id VARCHAR(36)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS idx_knowledge_bases_owner ON knowledge_bases (owner_user_id)"))
+        elif DATABASE_URL.startswith("sqlite"):
+            columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(knowledge_bases)")}
+            if "owner_user_id" not in columns:
+                connection.execute(text("ALTER TABLE knowledge_bases ADD COLUMN owner_user_id VARCHAR(36)"))
+
+
+def _ensure_admin_user() -> None:
+    """首次启动创建 admin/admin，并把历史无归属知识库交给该账号。"""
+    from datetime import timezone
+    import uuid
+
+    with get_session() as session:
+        user = session.query(User).filter(User.username == "admin").one_or_none()
+        if user is None:
+            user = User(id=str(uuid.uuid4()), username="admin", password_hash=hash_password("admin"), role="user", created_at=datetime.now(timezone.utc))
+            session.add(user)
+            session.flush()
+        session.query(KnowledgeBase).filter(KnowledgeBase.owner_user_id.is_(None)).update({KnowledgeBase.owner_user_id: user.id}, synchronize_session=False)
 
 
 @contextmanager
