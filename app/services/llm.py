@@ -6,6 +6,7 @@ from typing import Dict, Iterable, List
 
 import httpx
 from dotenv import load_dotenv
+from app.langchain.prompts import SYSTEM_PROMPT
 from app.services.chunker import estimate_tokens
 
 load_dotenv(override=False)
@@ -31,7 +32,7 @@ def generate_answer(question: str, contexts: List[Dict]) -> str:
         "model": model,
         "temperature": 0.2,
         "messages": [
-            {"role": "system", "content": "你是企业知识库助手。只能依据用户提供的检索资料回答；资料不足时回答‘根据当前知识库无法确认’，不要编造信息。回答简洁，并用[1]、[2]标记引用。"},
+            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
     }
@@ -73,7 +74,7 @@ def stream_answer(question: str, contexts: List[Dict]) -> Iterable[str]:
     if not api_key:
         raise LLMError("缺少 LLM_API_KEY，请检查 .env")
     payload = {"model": model, "temperature": 0.2, "stream": True, "messages": [
-        {"role": "system", "content": "你是企业知识库助手。只能依据检索资料回答；资料不足时回答‘根据当前知识库无法确认’，不要编造信息。"},
+        {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"问题：{question}\n\n检索资料：\n{_build_evidence(contexts)}"},
     ]}
     try:
