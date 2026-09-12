@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List
+from typing import Any, Dict, List
 
 from pydantic import BaseModel, Field
 
@@ -27,7 +27,16 @@ class DocumentResponse(BaseModel):
     size: str
     chunk_count: int
     status: str
+    parser_name: str
+    parser_version: str
+    quality: Dict[str, Any]
+    review_note: str
     created_at: datetime
+
+
+class DocumentReviewRequest(BaseModel):
+    action: str = Field(pattern="^(approve|reject)$")
+    note: str = Field(default="", max_length=1000)
 
 
 class DocumentPageResponse(BaseModel):
@@ -44,8 +53,10 @@ class DocumentChunkResponse(BaseModel):
     page: int
     content: str
     token_count: int
+    metadata: Dict[str, Any]
 
 
 class DocumentDetailResponse(DocumentResponse):
     pages: List[DocumentPageResponse]
+    elements: List[Dict[str, Any]]
     chunks: List[DocumentChunkResponse]

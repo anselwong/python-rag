@@ -6,8 +6,6 @@ from typing import Optional
 from fastapi import UploadFile
 from sqlalchemy import select
 from langchain_core.documents import Document
-from .loaders import load_file
-from .splitters import split_documents
 from .embeddings import BailianEmbeddings
 from .vectorstore import add_documents, similarity_search
 from .chain import run as chain_run, stream as chain_stream
@@ -16,6 +14,7 @@ from app.core.database import ChatSession, Document as DbDocument, Chunk, LangCh
 from .history import SqlChatMessageHistory
 from .prompts import SYSTEM_PROMPT
 from .tokenizer import count_tokens, fit_contexts_to_budget
+from app.services.document_processing import build_chunk_documents, element_dicts, parse_document
 
 UPLOAD_DIR = settings.data_dir / "uploads"; UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 embeddings = BailianEmbeddings()
@@ -29,35 +28,75 @@ def _cos(a,b): return sum(x*y for x,y in zip(a,b))
 
 async def ingest(knowledge_base_id: str, upload: UploadFile) -> dict:
     name=Path(upload.filename or "未命名").name; ext=Path(name).suffix.lower()
-    if ext not in settings.allowed_extensions: raise ValueError("仅支持 PDF、DOCX、MD、TXT 文件")
+    if ext not in settings.allowed_extensions: raise ValueError("不支持该文件类型")
     did=str(uuid.uuid4()); destination=UPLOAD_DIR/f"{did}{ext}"; size=0
     try:
         with destination.open("wb") as f:
             while data:=await upload.read(1024*1024): size+=len(data); f.write(data)
-        pages=load_file(destination, ext); chunks=split_documents(pages)
+        parsed = parse_document(destination, ext)
+        chunks=build_chunk_documents(parsed.elements, name)
         for i, doc in enumerate(chunks):
-            doc.metadata.update({"knowledge_base_id": knowledge_base_id, "document_id": did, "chunk_id": f"{did}-{i}", "document_name": name})
-        # 向量化与持久化由 LangChain VectorStore 负责，业务层不再计算余弦或拼接向量 SQL。
-        add_documents(knowledge_base_id, chunks, embeddings)
+            doc.metadata.update({"knowledge_base_id": knowledge_base_id, "document_id": did, "chunk_id": f"{did}-{i}", "document_name": name, "parser_name": parsed.parser_name})
         timestamp=datetime.now(timezone.utc)
+        status = parsed.quality["recommended_status"]
         with get_session() as session:
             kb=session.get(KnowledgeBase, knowledge_base_id)
             if not kb: raise KeyError("知识库不存在")
-            page_rows=[{"page":d.metadata.get("page",1),"text":d.page_content} for d in pages]
-            session.add(DbDocument(id=did, knowledge_base_id=knowledge_base_id,name=name,stored_name=destination.name,file_type=ext[1:].upper(),size_bytes=size,chunk_count=len(chunks),status="ready",pages_json=json.dumps(page_rows,ensure_ascii=False),created_at=timestamp))
+            session.add(DbDocument(id=did, knowledge_base_id=knowledge_base_id,name=name,stored_name=destination.name,file_type=ext[1:].upper(),size_bytes=size,chunk_count=len(chunks),status=status,pages_json=json.dumps(parsed.pages,ensure_ascii=False),elements_json=json.dumps(element_dicts(parsed.elements),ensure_ascii=False),parser_name=parsed.parser_name,parser_version=parsed.parser_version,quality_json=json.dumps(parsed.quality,ensure_ascii=False),created_at=timestamp))
             # LangChainChunk 没有 ORM relationship，显式 flush 保证父文档先于子切片插入。
             session.flush()
             # 仅保存可审计的切片元数据；向量正文由 LangChain PGVector 管理。
             # token_count 使用本地 tokenizer，不再把 Python 字符数错误标成 Token。
             for i, doc in enumerate(chunks):
                 token_count = count_tokens(doc.page_content)
-                session.add(LangChainChunk(id=f"{did}-{i}",document_id=did,knowledge_base_id=knowledge_base_id,page=int(doc.metadata.get("page",1)),content=doc.page_content,token_count=token_count,created_at=timestamp))
+                metadata_json = json.dumps(doc.metadata, ensure_ascii=False)
+                session.add(LangChainChunk(id=f"{did}-{i}",document_id=did,knowledge_base_id=knowledge_base_id,page=int(doc.metadata.get("page",1)),content=doc.page_content,token_count=token_count,metadata_json=metadata_json,created_at=timestamp))
                 # 旧 chunks 仅作为共用文档管理/迁移数据，不参与 LangChain 检索。
-                session.add(Chunk(id=f"{did}-{i}", document_id=did, page=int(doc.metadata.get("page",1)), content=doc.page_content, token_count=token_count, embedding=embeddings.embed_query(doc.page_content)))
+                session.add(Chunk(id=f"{did}-{i}", document_id=did, page=int(doc.metadata.get("page",1)), content=doc.page_content, token_count=token_count, metadata_json=metadata_json, embedding=embeddings.embed_query(doc.page_content) if status == "ready" else None))
             kb.updated_at=timestamp
-        return {"id":did,"knowledge_base_id":knowledge_base_id,"name":name,"type":ext[1:].upper(),"size":f"{max(1,round(size/1024))} KB","chunk_count":len(chunks),"status":"ready","created_at":timestamp}
+        # 审核前仍保存解析产物供预览，但绝不能将低质量文件写入向量库污染召回。
+        if status == "ready" and chunks:
+            add_documents(knowledge_base_id, chunks, embeddings)
+        return {"id":did,"knowledge_base_id":knowledge_base_id,"name":name,"type":ext[1:].upper(),"size":f"{max(1,round(size/1024))} KB","chunk_count":len(chunks),"status":status,"parser_name":parsed.parser_name,"parser_version":parsed.parser_version,"quality":parsed.quality,"review_note":"","created_at":timestamp}
     except Exception:
         destination.unlink(missing_ok=True); raise
+
+
+def review_document(knowledge_base_id: str, document_id: str, action: str, note: str = "") -> dict:
+    """人工审核低质量文档；通过后才把已保存的 Chunk 发布到向量库。"""
+    with get_session() as session:
+        item = session.query(DbDocument).filter(DbDocument.id == document_id, DbDocument.knowledge_base_id == knowledge_base_id).one_or_none()
+        if item is None:
+            raise KeyError("文档不存在")
+        if item.status not in {"needs_review", "rejected"}:
+            raise ValueError("只有待审核或已拒绝的文档可以进行人工审核")
+        if action == "reject":
+            item.status = "rejected"
+            item.review_note = note
+            return _document_result(item)
+        if action != "approve":
+            raise ValueError("审核动作必须为 approve 或 reject")
+        chunk_rows = session.query(LangChainChunk).filter(LangChainChunk.document_id == document_id).order_by(LangChainChunk.id).all()
+        vector_documents = [Document(page_content=row.content, metadata=json.loads(row.metadata_json)) for row in chunk_rows]
+        item.status = "ready"
+        item.review_note = note
+        result = _document_result(item)
+    # 向量写入是外部存储操作，事务提交后执行；失败时状态回滚为待审核，避免假发布。
+    try:
+        if vector_documents:
+            add_documents(knowledge_base_id, vector_documents, embeddings)
+    except Exception:
+        with get_session() as session:
+            item = session.get(DbDocument, document_id)
+            if item is not None:
+                item.status = "needs_review"
+                item.review_note = "发布向量失败，请重试审核。"
+        raise
+    return result
+
+
+def _document_result(item: DbDocument) -> dict:
+    return {"id": item.id, "knowledge_base_id": item.knowledge_base_id, "name": item.name, "type": item.file_type, "size": f"{max(1, round(item.size_bytes / 1024))} KB", "chunk_count": item.chunk_count, "status": item.status, "parser_name": item.parser_name, "parser_version": item.parser_version, "quality": json.loads(item.quality_json), "review_note": item.review_note, "created_at": item.created_at}
 
 def retrieve(kb_id:str, query:str, top_k:int=5, threshold:float=0.0, mode:str="vector", vector_weight:float=None, keyword_weight:float=None) -> list[dict]:
     """统一检索入口。mode=hybrid 时在向量召回上叠加 BM25 关键词重排（Day 13）。

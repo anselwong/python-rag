@@ -7,9 +7,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
     PIP_DEFAULT_TIMEOUT=120 \
     RAG_DATA_DIR=/var/lib/rag \
-    TIKTOKEN_CACHE_DIR=/opt/tiktoken
+    TIKTOKEN_CACHE_DIR=/opt/tiktoken \
+    HF_HOME=/var/lib/rag/models/huggingface \
+    DOCLING_ARTIFACTS_PATH=/var/lib/rag/models/docling
 
 WORKDIR /app
+
+# Docling 的默认依赖解析会在 Linux 上选择带 CUDA 的 PyTorch 包，使纯 CPU 的 API
+# 镜像平白膨胀数 GB。先从官方 CPU wheel 索引安装 torch/torchvision，后续解析
+# Docling 依赖时复用已安装的满足版本；生产环境不携带 GPU 运行时。
+# 本层不依赖应用源码或 pyproject，日常改业务代码不会导致重新下载 CPU 推理依赖。
+RUN python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision
 
 COPY pyproject.toml ./
 COPY app ./app
@@ -17,7 +25,7 @@ COPY app ./app
 COPY scripts ./scripts
 
 # 基础镜像自带 pip 可能无法正确解析较新的 PEP 517 依赖元数据；先升级打包工具，
-# 并优先使用 PyPI 的预编译 wheel，避免线上构建 C 扩展和依赖解析失败。
+# 并优先使用预编译 wheel，避免线上构建 C 扩展和依赖解析失败。
 
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && python -m pip install --no-cache-dir --prefer-binary .
@@ -29,10 +37,19 @@ RUN mkdir -p "$TIKTOKEN_CACHE_DIR" \
     && chmod -R a+rX "$TIKTOKEN_CACHE_DIR"
 
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /var/lib/rag/uploads \
+    && mkdir -p /var/lib/rag/uploads /var/lib/rag/models/huggingface /var/lib/rag/models/docling \
     && chown -R appuser:appuser /app /var/lib/rag
 
 USER appuser
 EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
+
+# CI 或发布前验收使用相同的 Python 3.11 与解析依赖层，只额外安装 pytest 并复制
+# 测试源码；默认 runtime 镜像不包含这些开发依赖，保持线上运行面最小。
+FROM runtime AS test
+
+USER root
+COPY tests ./tests
+RUN python -m pip install --no-cache-dir '.[dev]'
+USER appuser

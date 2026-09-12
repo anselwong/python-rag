@@ -18,9 +18,9 @@ from sqlalchemy import text  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.core.database import Document as DbDocument, LangChainChunk, get_session  # noqa: E402
 from app.langchain.embeddings import BailianEmbeddings  # noqa: E402
-from app.langchain.loaders import load_file  # noqa: E402
-from app.langchain.splitters import split_documents  # noqa: E402
 from app.langchain.vectorstore import add_documents, get_store  # noqa: E402
+from app.langchain.tokenizer import count_tokens  # noqa: E402
+from app.services.document_processing import build_chunk_documents, element_dicts, parse_document  # noqa: E402
 
 
 def _existing_document_ids(kb_id: str, embeddings: BailianEmbeddings) -> set:
@@ -44,6 +44,9 @@ def backfill(kb_id: str) -> None:
     with get_session() as session:
         documents = session.query(DbDocument).filter(DbDocument.knowledge_base_id == kb_id).all()
     for doc in documents:
+        if doc.status != "ready":
+            print(f"跳过（尚未发布）: {doc.name}")
+            continue
         if doc.id in done:
             print(f"跳过（已有向量）: {doc.name}")
             continue
@@ -51,20 +54,30 @@ def backfill(kb_id: str) -> None:
         if not path.exists():
             print(f"警告：原始文件缺失，跳过 {doc.name} -> {path}")
             continue
-        pages = load_file(path, Path(doc.stored_name).suffix.lower())
-        chunks = split_documents(pages)
+        parsed = parse_document(path, Path(doc.stored_name).suffix.lower())
+        chunks = build_chunk_documents(parsed.elements, doc.name)
         for i, chunk in enumerate(chunks):
-            chunk.metadata.update({"knowledge_base_id": kb_id, "document_id": doc.id, "chunk_id": f"{doc.id}-{i}", "document_name": doc.name})
+            chunk.metadata.update({"knowledge_base_id": kb_id, "document_id": doc.id, "chunk_id": f"{doc.id}-{i}", "document_name": doc.name, "parser_name": parsed.parser_name})
         add_documents(kb_id, chunks, embeddings)
-        # LangChainChunk 元数据表同步补齐，保证文档详情页的切片预览一致。
+        # 审计字段与主上传链路同步，确保历史文档重建后也能查看解析器和结构元素。
         timestamp = datetime.now(timezone.utc)
         with get_session() as session:
+            current = session.get(DbDocument, doc.id)
+            if current is not None:
+                import json
+                current.pages_json = json.dumps(parsed.pages, ensure_ascii=False)
+                current.elements_json = json.dumps(element_dicts(parsed.elements), ensure_ascii=False)
+                current.parser_name = parsed.parser_name
+                current.parser_version = parsed.parser_version
+                current.quality_json = json.dumps(parsed.quality, ensure_ascii=False)
+                current.chunk_count = len(chunks)
             existing = {row.id for row in session.query(LangChainChunk).filter(LangChainChunk.document_id == doc.id).all()}
             for i, chunk in enumerate(chunks):
                 chunk_id = f"{doc.id}-{i}"
                 if chunk_id in existing:
                     continue
-                session.add(LangChainChunk(id=chunk_id, document_id=doc.id, knowledge_base_id=kb_id, page=int(chunk.metadata.get("page", 1)), content=chunk.page_content, token_count=len(chunk.page_content), created_at=timestamp))
+                import json
+                session.add(LangChainChunk(id=chunk_id, document_id=doc.id, knowledge_base_id=kb_id, page=int(chunk.metadata.get("page", 1)), content=chunk.page_content, token_count=count_tokens(chunk.page_content), metadata_json=json.dumps(chunk.metadata, ensure_ascii=False), created_at=timestamp))
         print(f"回填完成: {doc.name} -> {len(chunks)} 个切片")
 
 

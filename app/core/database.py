@@ -87,6 +87,11 @@ class Document(Base):
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     pages_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    elements_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    parser_name: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    parser_version: Mapped[str] = mapped_column(String(40), default="", nullable=False)
+    quality_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    review_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     knowledge_base: Mapped[KnowledgeBase] = relationship(back_populates="documents")
     # relationship 让 SQLAlchemy 的 flush 按依赖排序（先 documents 后 chunks）。
@@ -106,6 +111,7 @@ class Chunk(Base):
     page: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     embedding = mapped_column(Vector(1536) if Vector else Text, nullable=True)
     document: Mapped["Document"] = relationship(back_populates="chunks")
 
@@ -123,6 +129,7 @@ class LangChainChunk(Base):
     page: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     embedding = mapped_column(Vector(1536) if Vector else Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -182,6 +189,7 @@ def initialize_database() -> None:
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.create_all(engine)
     _migrate_auth_columns()
+    _migrate_document_processing_columns()
     _ensure_admin_user()
     # create_all 不会为已存在的表增加新列。项目尚未引入 Alembic，因此在启动时
     # 做一次幂等的小迁移，确保已部署环境也能持久化模型真实 Token 用量。
@@ -204,6 +212,31 @@ def _migrate_auth_columns() -> None:
             columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(knowledge_bases)")}
             if "owner_user_id" not in columns:
                 connection.execute(text("ALTER TABLE knowledge_bases ADD COLUMN owner_user_id VARCHAR(36)"))
+
+
+def _migrate_document_processing_columns() -> None:
+    """为既有部署补齐解析审计字段，避免重建数据库才能升级解析链路。"""
+    document_columns = {
+        "elements_json": "TEXT NOT NULL DEFAULT '[]'",
+        "parser_name": "VARCHAR(80) NOT NULL DEFAULT ''",
+        "parser_version": "VARCHAR(40) NOT NULL DEFAULT ''",
+        "quality_json": "TEXT NOT NULL DEFAULT '{}'",
+        "review_note": "TEXT NOT NULL DEFAULT ''",
+    }
+    chunk_columns = {"metadata_json": "TEXT NOT NULL DEFAULT '{}'"}
+    with engine.begin() as connection:
+        if DATABASE_URL.startswith("postgresql"):
+            for name, definition in document_columns.items():
+                connection.execute(text(f"ALTER TABLE documents ADD COLUMN IF NOT EXISTS {name} {definition}"))
+            for table_name in ("chunks", "langchain_chunks"):
+                for name, definition in chunk_columns.items():
+                    connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {name} {definition}"))
+        elif DATABASE_URL.startswith("sqlite"):
+            for table_name, columns in (("documents", document_columns), ("chunks", chunk_columns), ("langchain_chunks", chunk_columns)):
+                existing = {row[1] for row in connection.exec_driver_sql(f"PRAGMA table_info({table_name})")}
+                for name, definition in columns.items():
+                    if name not in existing:
+                        connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {name} {definition}"))
 
 
 def _ensure_admin_user() -> None:

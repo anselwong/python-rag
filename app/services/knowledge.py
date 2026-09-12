@@ -70,12 +70,13 @@ def get_document(document_id: str) -> Dict:
             raise KeyError("文档不存在")
         result = _document_row(item)
         result["pages"] = [{"document_id": document_id, "page": page["page"], "text": page["text"]} for page in json.loads(item.pages_json)]
+        result["elements"] = json.loads(item.elements_json)
         # 详情接口同时返回切片，方便前端验证“解析文本 -> 切片”的中间产物。
         # embedding 属于内部向量数据，不能为了预览把它序列化到 HTTP 响应。
         # ID 后缀是数字序号，必须按整数排序；字符串排序会把 10 排在 2 前面。
         ordered_chunks = sorted(item.chunks, key=lambda value: int(value.id.rsplit("-", 1)[-1]))
         result["chunks"] = [
-            {"id": chunk.id, "document_id": document_id, "page": chunk.page, "content": chunk.content, "token_count": chunk.token_count}
+            {"id": chunk.id, "document_id": document_id, "page": chunk.page, "content": chunk.content, "token_count": chunk.token_count, "metadata": json.loads(chunk.metadata_json)}
             for chunk in ordered_chunks
         ]
         return result
@@ -86,6 +87,12 @@ async def ingest_document(knowledge_base_id: str, upload: UploadFile) -> Dict:
     # LangChain 分支由 app.langchain.service 负责 Loader/Splitter/Embedding 全链路。
     from app.langchain.service import ingest
     return await ingest(knowledge_base_id, upload)
+
+
+def review_document(knowledge_base_id: str, document_id: str, action: str, note: str = "") -> Dict:
+    """代理人工审核动作，路由层不直接接触向量存储实现。"""
+    from app.langchain.service import review_document as review
+    return review(knowledge_base_id, document_id, action, note)
 
 
 def delete_document(knowledge_base_id: str, document_id: str) -> None:
@@ -136,7 +143,7 @@ def _knowledge_row(item: KnowledgeBase) -> Dict:
 
 
 def _document_row(item: Document) -> Dict:
-    return {"id": item.id, "knowledge_base_id": item.knowledge_base_id, "name": item.name, "type": item.file_type, "size": _format_size(item.size_bytes), "chunk_count": item.chunk_count, "status": item.status, "created_at": item.created_at}
+    return {"id": item.id, "knowledge_base_id": item.knowledge_base_id, "name": item.name, "type": item.file_type, "size": _format_size(item.size_bytes), "chunk_count": item.chunk_count, "status": item.status, "parser_name": item.parser_name, "parser_version": item.parser_version, "quality": json.loads(item.quality_json), "review_note": item.review_note, "created_at": item.created_at}
 
 
 def _format_size(size: int) -> str:

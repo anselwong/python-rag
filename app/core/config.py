@@ -27,7 +27,9 @@ class Settings:
     cors_origins: List[str] = None  # type: ignore[assignment]
     data_dir: Path = Path(os.getenv("RAG_DATA_DIR", "data"))
     max_upload_size: int = 20 * 1024 * 1024
-    allowed_extensions: tuple = (".pdf", ".docx", ".md", ".txt")
+    # 解析器按文件类型路由；所有格式最终会被归一为内部结构元素，而不是直接
+    # 依赖某个第三方库的纯文本输出。
+    allowed_extensions: tuple = (".pdf", ".docx", ".xlsx", ".xls", ".csv", ".pptx", ".md", ".html", ".htm", ".json", ".xml", ".txt")
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cors_origins", _cors_origins())

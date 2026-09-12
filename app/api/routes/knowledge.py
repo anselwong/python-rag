@@ -4,7 +4,7 @@ from typing import List
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
-from app.schemas.knowledge import DocumentDetailResponse, DocumentResponse, KnowledgeBaseCreate, KnowledgeBaseResponse
+from app.schemas.knowledge import DocumentDetailResponse, DocumentResponse, DocumentReviewRequest, KnowledgeBaseCreate, KnowledgeBaseResponse
 from app.services import knowledge
 from app.core.database import User
 from app.api.dependencies import get_current_user
@@ -48,6 +48,17 @@ async def post_document(knowledge_base_id: str, file: UploadFile = File(...), cu
     try:
         knowledge.ensure_knowledge_base_owner(knowledge_base_id, current_user.id)
         return await knowledge.ingest_document(knowledge_base_id, file)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post("/{knowledge_base_id}/documents/{document_id}/review", response_model=DocumentResponse, summary="Approve or reject a parsed document")
+def post_document_review(knowledge_base_id: str, document_id: str, payload: DocumentReviewRequest, current_user: User = Depends(get_current_user)) -> dict:
+    try:
+        knowledge.ensure_knowledge_base_owner(knowledge_base_id, current_user.id)
+        return knowledge.review_document(knowledge_base_id, document_id, payload.action, payload.note.strip())
     except KeyError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except ValueError as error:
