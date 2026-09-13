@@ -7,6 +7,7 @@
 
 import json
 import re
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -14,6 +15,10 @@ from typing import Any, Dict, Iterable, List, Tuple
 from langchain_core.documents import Document
 
 from app.langchain.splitters import split_documents
+
+
+_fast_pdf_converter: Any = None
+_ocr_pdf_converter: Any = None
 
 
 class DocumentProcessingError(ValueError):
@@ -107,14 +112,19 @@ def element_dicts(elements: Iterable[DocumentElement]) -> List[Dict[str, Any]]:
 
 def _parse_pdf(path: Path) -> Tuple[List[DocumentElement], str, str, List[Dict[str, Any]], List[str]]:
     try:
-        from docling.document_converter import DocumentConverter
-
-        result = DocumentConverter().convert(str(path))
+        # 转换器和其加载的版面/表格模型在 API 进程内复用；否则每次上传都会
+        # 重载模型，小型 PDF 也会产生十余秒的固定开销。
+        result = _get_fast_pdf_converter().convert(str(path))
         markdown = result.document.export_to_markdown()
+        warnings: List[str] = []
+        if len(re.sub(r"\s+", "", markdown)) < 40:
+            result = _get_ocr_pdf_converter().convert(str(path))
+            markdown = result.document.export_to_markdown()
+            warnings.append("未检测到足够文字层，已启用 OCR 重试")
         elements = _elements_from_markdown(markdown)
         if not any(element.content.strip() for element in elements):
             raise DocumentProcessingError("Docling 未提取到可用文本")
-        return elements, "docling", _module_version("docling"), _pages_from_elements(elements), []
+        return elements, "docling", _module_version("docling"), _pages_from_elements(elements), warnings
     except Exception as error:
         # pypdf 是许可友好的文本型 PDF 兜底；同时尝试 pdfplumber 的矢量表格
         # 提取，确保主解析器临时失败时不会把关键规则表退化成散乱文字。
@@ -138,6 +148,45 @@ def _parse_pdf(path: Path) -> Tuple[List[DocumentElement], str, str, List[Dict[s
         except Exception:
             pass
         return elements, "pypdf-fallback", _module_version("pypdf"), pages, [f"Docling 不可用或解析失败：{type(error).__name__}"]
+
+
+def _get_fast_pdf_converter() -> Any:
+    global _fast_pdf_converter
+    if _fast_pdf_converter is None:
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+
+        fast_options = PdfPipelineOptions()
+        fast_options.do_ocr = False
+        _fast_pdf_converter = DocumentConverter(
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=fast_options)}
+        )
+    return _fast_pdf_converter
+
+
+def _get_ocr_pdf_converter() -> Any:
+    global _ocr_pdf_converter
+    if _ocr_pdf_converter is None:
+        from docling.document_converter import DocumentConverter
+
+        _ocr_pdf_converter = DocumentConverter()
+    return _ocr_pdf_converter
+
+
+def warm_document_parsers() -> None:
+    """在服务就绪前预热 PDF 解析与 OCR 模型，避免首位用户承担冷启动。"""
+    from pypdf import PdfWriter
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as source:
+        warmup_path = Path(source.name)
+        writer = PdfWriter()
+        writer.add_blank_page(width=1, height=1)
+        writer.write(source)
+    try:
+        parse_document(warmup_path, ".pdf")
+    finally:
+        warmup_path.unlink(missing_ok=True)
 
 
 def _parse_docx(path: Path) -> Tuple[List[DocumentElement], str, str, List[Dict[str, Any]], List[str]]:

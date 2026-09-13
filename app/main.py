@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.database import initialize_database
+from app.services.document_processing import warm_document_parsers
 
 
 def create_app() -> FastAPI:
@@ -27,6 +28,8 @@ def create_app() -> FastAPI:
     def startup() -> None:
         # 启动时初始化表结构，保证本地开发无需手动执行迁移脚本。
         initialize_database()
+        # 模型加载发生在服务对外健康之前，避免第一个上传文档的用户等待冷启动。
+        warm_document_parsers()
     return application
 
 

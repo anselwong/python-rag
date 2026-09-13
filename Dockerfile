@@ -8,8 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DEFAULT_TIMEOUT=120 \
     RAG_DATA_DIR=/var/lib/rag \
     TIKTOKEN_CACHE_DIR=/opt/tiktoken \
-    HF_HOME=/var/lib/rag/models/huggingface \
-    DOCLING_ARTIFACTS_PATH=/var/lib/rag/models/docling
+    HF_HOME=/var/lib/rag/models/huggingface
 
 WORKDIR /app
 
@@ -30,14 +29,25 @@ COPY scripts ./scripts
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && python -m pip install --no-cache-dir --prefer-binary .
 
+# Docling 表格识别依赖 OpenCV；slim 基础镜像不带其运行时所需的 X11/GL
+# 共享库。只安装运行库，不引入完整桌面环境。放在依赖层之后，使日常补充
+# 系统运行库不会使 PyTorch 和 Docling 的下载缓存失效。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libglib2.0-0 libgl1 libxcb1 libxext6 libsm6 \
+    && rm -rf /var/lib/apt/lists/*
+
 # tiktoken 的词表首次使用需要下载。构建期预热并固定缓存路径，保证运行容器
 # 不依赖外网，也不会在第一次用户问答时因缺少词表失败。
 RUN mkdir -p "$TIKTOKEN_CACHE_DIR" \
     && python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" \
     && chmod -R a+rX "$TIKTOKEN_CACHE_DIR"
 
+# RapidOCR 默认把按需下载的 OCR 权重写到包内 models 目录。把它链接到
+# parser_models 卷，容器重建后仍复用已下载权重，避免再次下载。
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /var/lib/rag/uploads /var/lib/rag/models/huggingface /var/lib/rag/models/docling \
+    && mkdir -p /var/lib/rag/uploads /var/lib/rag/models/huggingface /var/lib/rag/models/rapidocr \
+    && rm -rf /usr/local/lib/python3.11/site-packages/rapidocr/models \
+    && ln -s /var/lib/rag/models/rapidocr /usr/local/lib/python3.11/site-packages/rapidocr/models \
     && chown -R appuser:appuser /app /var/lib/rag
 
 USER appuser
